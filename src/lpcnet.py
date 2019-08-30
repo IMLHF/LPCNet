@@ -35,6 +35,7 @@ from mdense import MDense
 import numpy as np
 import h5py
 import sys
+import tensorflow as tf
 
 frame_size = 160
 pcm_bits = 8
@@ -42,8 +43,9 @@ embed_size = 128
 pcm_levels = 2**pcm_bits
 
 class Sparsify(Callback):
-    def __init__(self, t_start, t_end, interval, density):
+    def __init__(self, t_start, t_end, interval, density, model):
         super(Sparsify, self).__init__()
+        self.original_model = model
         self.batch = 0
         self.t_start = t_start
         self.t_end = t_end
@@ -52,13 +54,15 @@ class Sparsify(Callback):
 
     def on_batch_end(self, batch, logs=None):
         #print("batch number", self.batch)
+        # tf.get_default_graph().finalize()
         self.batch += 1
+        #print(logs, K.get_value(self.model.optimizer.lr), flush=True)
         if self.batch < self.t_start or ((self.batch-self.t_start) % self.interval != 0 and self.batch < self.t_end):
             #print("don't constrain");
             pass
         else:
             #print("constrain");
-            layer = self.model.get_layer('gru_a')
+            layer = self.original_model.get_layer('gru_a')
             w = layer.get_weights()
             p = w[1]
             nb = p.shape[1]//p.shape[0]
@@ -78,7 +82,7 @@ class Sparsify(Callback):
                 S=np.sum(L*L, axis=-1)
                 SS=np.sort(np.reshape(S, (-1,)))
                 thresh = SS[round(N*N//16*(1-density))]
-                mask = (S>=thresh).astype('float32');
+                mask = (S>=thresh).astype('float32')
                 mask = np.repeat(mask, 16, axis=1)
                 mask = np.minimum(1, mask + np.diag(np.ones((N,))))
                 mask = np.transpose(mask, (1, 0))
@@ -113,7 +117,7 @@ class PCMInit(Initializer):
             'seed': self.seed
         }
 
-def new_lpcnet_model(rnn_units1=384, rnn_units2=16, nb_used_features = 38, training=False, use_gpu=True, adaptation=False):
+def new_lpcnet_model(rnn_units1=384, rnn_units2=16, nb_used_features=38, training=False, use_gpu=True, adaptation=False):
     pcm = Input(shape=(None, 3))
     feat = Input(shape=(None, nb_used_features))
     pitch = Input(shape=(None, 1))

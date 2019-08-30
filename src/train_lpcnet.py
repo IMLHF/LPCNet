@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 '''Copyright (c) 2018 Mozilla
 
    Redistribution and use in source and binary forms, with or without
@@ -35,25 +34,27 @@ from keras.callbacks import ModelCheckpoint
 from ulaw import ulaw2lin, lin2ulaw
 import keras.backend as K
 import h5py
-
+#from keras.utils.training_utils import multi_gpu_model
+from keras.callbacks import ReduceLROnPlateau
 import tensorflow as tf
 from keras.backend.tensorflow_backend import set_session
 config = tf.ConfigProto()
 
 # use this option to reserve GPU memory, e.g. for running more than
 # one thing at a time.  Best to disable for GPUs with small memory
-config.gpu_options.per_process_gpu_memory_fraction = 0.44
+#config.gpu_options.per_process_gpu_memory_fraction = 0.44
+config.gpu_options.allow_growth = True
 
 set_session(tf.Session(config=config))
 
-nb_epochs = 120
+nb_epochs = 100
 
 # Try reducing batch_size if you run out of memory on your GPU
 batch_size = 64
 
 model, _, _ = lpcnet.new_lpcnet_model(training=True)
 
-model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['sparse_categorical_accuracy'])
+# model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['sparse_categorical_accuracy'])
 model.summary()
 
 feature_file = sys.argv[1]
@@ -111,15 +112,22 @@ adaptation = False
 if adaptation:
     #Adapting from an existing model
     model.load_weights('lpcnet24c_384_10_G16_120.h5')
-    sparsify = lpcnet.Sparsify(0, 0, 1, (0.05, 0.05, 0.2))
+    sparsify = lpcnet.Sparsify(0, 0, 1, (0.05, 0.05, 0.2), model)
     lr = 0.0001
-    decay = 0
 else:
     #Training from scratch
-    sparsify = lpcnet.Sparsify(2000, 40000, 400, (0.05, 0.05, 0.2))
+    sparsify = lpcnet.Sparsify(2000, 40000, 400, (0.05, 0.05, 0.2), model)
     lr = 0.001
-    decay = 5e-5
 
-model.compile(optimizer=Adam(lr, amsgrad=True, decay=decay), loss='sparse_categorical_crossentropy')
-model.save_weights('lpcnet30_384_10_G16_00.h5');
-model.fit([in_data, features, periods], out_exc, batch_size=batch_size, epochs=nb_epochs, validation_split=0.0, callbacks=[checkpoint, sparsify])
+# Optimizer
+lr_halving = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=1, mode='min', min_delta=0.0001, min_lr=5e-5)
+#with tf.device("/gpu:0"):
+optimizer_adam = Adam(lr, amsgrad=True)
+model.compile(optimizer=optimizer_adam, loss='sparse_categorical_crossentropy', metrics=['sparse_categorical_accuracy'])
+
+model.fit([in_data, features, periods], out_exc, batch_size=batch_size,
+          initial_epoch=0,
+          epochs=nb_epochs, validation_split=0.08, callbacks=[checkpoint, sparsify, lr_halving])
+# model.compile(optimizer=Adam(lr, amsgrad=True, decay=decay), loss='sparse_categorical_crossentropy')
+# model.save_weights('lpcnet30_384_10_G16_00.h5');
+# model.fit([in_data, features, periods], out_exc, batch_size=batch_size, epochs=nb_epochs, validation_split=0.0, callbacks=[checkpoint, sparsify])

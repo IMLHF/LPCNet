@@ -35,30 +35,35 @@ from ulaw import ulaw2lin, lin2ulaw
 import keras.backend as K
 import h5py
 from keras.utils.training_utils import multi_gpu_model
-from keras.callbacks import Callback
+from keras.callbacks import Callback, ReduceLROnPlateau
 
 import tensorflow as tf
 from keras.backend.tensorflow_backend import set_session
+
 config = tf.ConfigProto()
 
 # use this option to reserve GPU memory, e.g. for running more than
 # one thing at a time.  Best to disable for GPUs with small memory
-#config.gpu_options.per_process_gpu_memory_fraction = 0.44
-config.gpu_options.allow_growth = True
+config.gpu_options.per_process_gpu_memory_fraction = 0.83
+config.gpu_options.allocator_type = 'BFC' #A "Best-fit with coalescing" algorithm, simplified from a version of dlmalloc.
+config.gpu_options.allow_growth = False
 config.allow_soft_placement = True
 set_session(tf.Session(config=config))
 
+init_epoch = 0
 nb_epochs = 100
 
 # Try reducing batch_size if you run out of memory on your GPU
-batch_size = 128
+batch_size = 256
 
-with tf.device("/cpu:0"):
-    model, _, _ = lpcnet.new_lpcnet_model(training=True, use_gpu=True)
+#with tf.device("/gpu:0"):
+model, _, _ = lpcnet.new_lpcnet_model(training=True, use_gpu=True)
 
 #model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['sparse_categorical_accuracy'])
 model.summary()
-with tf.device("/cpu:0"):
+
+# with tf.device("/gpu:0"):
+if True:
     feature_file = sys.argv[1]
     pcm_file = sys.argv[2]     # 16 bit unsigned short PCM samples
     frame_size = model.frame_size
@@ -105,6 +110,16 @@ with tf.device("/cpu:0"):
     del pred
     del in_exc
 
+
+resume_training=False
+if not resume_training:
+    #Training from scratch
+    model.save_weights('lpcnet30_384_10_G16_00.h5')
+else:
+    init_epoch = 38 
+    model.load_weights('lpcnet30_384_10_G16_38.h5')
+
+
 # dump models to disk as we go
 # checkpoint = ModelCheckpoint('lpcnet30_384_10_G16_{epoch:02d}.h5')
 class MyCbk(Callback):
@@ -113,27 +128,21 @@ class MyCbk(Callback):
          self.model_to_save = model
 
     def on_epoch_end(self, epoch, logs=None):
+        print(logs, "lr:", K.get_value(self.model.optimizer.lr), flush=True)
         self.model_to_save.save('lpcnet30_384_10_G16_%02d.h5' % epoch)
 checkpoint = MyCbk(model)
-
-#Set this to True to adapt an existing model (e.g. on new data)
-adaptation = False
-
-if adaptation:
-    #Adapting from an existing model
-    model.load_weights('lpcnet30_384_10_G16_40.h5')
-    sparsify = lpcnet.Sparsify(0, 0, 1, (0.05, 0.05, 0.2), model)
-    lr = 0.0001
-    decay = 0
-else:
-    #Training from scratch
-    sparsify = lpcnet.Sparsify(2000, 40000, 400, (0.05, 0.05, 0.2), model)
-    lr = 0.001
-    decay = 5e-5
+sparsify = lpcnet.Sparsify(2000, 40000, 400, (0.05, 0.05, 0.2), model)
 
 parallel_model = multi_gpu_model(model, gpus=2)
-with tf.device("/cpu:0"):
-    optimizer_adam = Adam(lr, amsgrad=True, decay=decay)
-parallel_model.compile(optimizer=optimizer_adam, loss='sparse_categorical_crossentropy')
-model.save_weights('lpcnet30_384_10_G16_00.h5');
-parallel_model.fit([in_data, features, periods], out_exc, batch_size=batch_size, epochs=nb_epochs, validation_split=0.0, callbacks=[checkpoint, sparsify])
+
+# Optimizer
+lr = 0.001
+lr_halving = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=1, mode='min', min_delta=0.0001, min_lr=5e-5)
+#with tf.device("/gpu:0"):
+optimizer_adam = Adam(lr, amsgrad=True)
+parallel_model.compile(optimizer=optimizer_adam, loss='sparse_categorical_crossentropy', metrics=['sparse_categorical_accuracy'])
+
+#tf.get_default_graph().finalize()
+parallel_model.fit([in_data, features, periods], out_exc, batch_size=batch_size, 
+                   initial_epoch=init_epoch, 
+                   epochs=nb_epochs, validation_split=0.08, callbacks=[checkpoint, sparsify, lr_halving])
